@@ -42,6 +42,7 @@ class DailyScheduleState {
     this.selectedShiftId,
     this.openings = const [],
     this.selectedOpening,
+    this.selectedOpeningDetail,
     this.selectedLayerId,
     this.selectedScheduleShiftId,
     this.applicants = const [],
@@ -74,6 +75,7 @@ class DailyScheduleState {
   final String? selectedShiftId;
   final List<Map<String, dynamic>> openings;
   final Map<String, dynamic>? selectedOpening;
+  final Map<String, dynamic>? selectedOpeningDetail;
   final String? selectedLayerId;
   final String? selectedScheduleShiftId;
   final List<Map<String, dynamic>> applicants;
@@ -106,6 +108,7 @@ class DailyScheduleState {
     String? selectedShiftId,
     List<Map<String, dynamic>>? openings,
     Map<String, dynamic>? selectedOpening,
+    Map<String, dynamic>? selectedOpeningDetail,
     String? selectedLayerId,
     String? selectedScheduleShiftId,
     List<Map<String, dynamic>>? applicants,
@@ -138,6 +141,8 @@ class DailyScheduleState {
       selectedShiftId: selectedShiftId ?? this.selectedShiftId,
       openings: openings ?? this.openings,
       selectedOpening: selectedOpening ?? this.selectedOpening,
+      selectedOpeningDetail:
+          selectedOpeningDetail ?? this.selectedOpeningDetail,
       selectedLayerId: selectedLayerId ?? this.selectedLayerId,
       selectedScheduleShiftId:
           selectedScheduleShiftId ?? this.selectedScheduleShiftId,
@@ -157,7 +162,6 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
     _loadLookups();
     _loadFacilities();
     fetchStats();
-    fetchShifts();
     fetchOpenings();
   }
 
@@ -278,7 +282,6 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
     await _store.write(StorageKeys.facilityName, name);
     state = state.copyWith(selectedFacilityId: id, selectedFacilityName: name);
     fetchStats();
-    fetchShifts();
     fetchOpenings();
   }
 
@@ -287,6 +290,7 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
       date: date,
       selectedShiftId: null,
       selectedOpening: null,
+      selectedOpeningDetail: null,
       selectedLayerId: null,
       selectedScheduleShiftId: null,
       applicants: const [],
@@ -294,7 +298,6 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
       selectedEmployees: const [],
     );
     fetchStats();
-    fetchShifts();
     fetchOpenings();
   }
 
@@ -302,6 +305,7 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
     state = state.copyWith(
       selectedDepartmentId: id,
       selectedOpening: null,
+      selectedOpeningDetail: null,
       selectedLayerId: null,
       selectedScheduleShiftId: null,
       applicants: const [],
@@ -350,29 +354,8 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
   }
 
   Future<void> fetchShifts() async {
-    state = state.copyWith(shiftsLoading: true);
-    try {
-      final dateStr = _formatDate(state.date);
-      final resp = await _api.get(Endpoints.dailyScheduleShiftList(dateStr));
-      final data = resp.data is Map<String, dynamic>
-          ? Map<String, dynamic>.from(resp.data)
-          : <String, dynamic>{};
-      final previous = (data["previous"] as List? ?? [])
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
-      final current = (data["current"] as List? ?? [])
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
-      final merged = [
-        ...previous.map((e) => {...e, "bucket": "previous"}),
-        ...current.map((e) => {...e, "bucket": "current"}),
-      ];
-      state = state.copyWith(shifts: merged, shiftsLoading: false);
-    } catch (_) {
-      state = state.copyWith(shiftsLoading: false);
-    }
+    // Shift list is derived from daily openings v4 list (fetchOpenings).
+    await fetchOpenings();
   }
 
   Future<void> fetchOpenings() async {
@@ -391,28 +374,37 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
       final list = _extractList(data);
       final openings = list
           .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
+          .map((e) => _normalizeShiftSummary(Map<String, dynamic>.from(e)))
           .toList();
+
+      final departments = _deriveDepartmentsFromOpenings(openings);
+      String? selectedDept = state.selectedDepartmentId;
+      if (selectedDept != null &&
+          !departments.any((d) => d["id"]?.toString() == selectedDept)) {
+        selectedDept = null;
+      }
 
       Map<String, dynamic>? selected = state.selectedOpening;
       if (selected == null && openings.isNotEmpty) {
         selected = openings.first;
       } else if (selected != null) {
-        final id = _openingId(selected);
+        final id = _shiftSummaryId(selected);
         selected = openings.firstWhere(
-          (o) => _openingId(o) == id,
+          (o) => _shiftSummaryId(o) == id,
           orElse: () => openings.isNotEmpty ? openings.first : selected!,
         );
       }
 
       state = state.copyWith(
         openings: openings,
+        departments: departments,
+        selectedDepartmentId: selectedDept,
         selectedOpening: selected,
         openingsLoading: false,
       );
 
       if (selected != null) {
-        _ensureSelectionFromOpening(selected, refreshLists: true);
+        await _loadShiftDetails(selected);
       }
     } catch (_) {
       state = state.copyWith(openingsLoading: false);
@@ -422,11 +414,12 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
   void selectOpening(Map<String, dynamic> opening) {
     state = state.copyWith(
       selectedOpening: opening,
+      selectedOpeningDetail: null,
       applicants: const [],
       employees: const [],
       selectedEmployees: const [],
     );
-    _ensureSelectionFromOpening(opening, refreshLists: true);
+    _loadShiftDetails(opening);
   }
 
   void selectLayer(String id) {
@@ -440,6 +433,28 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
     state = state.copyWith(selectedScheduleShiftId: shiftId);
     fetchApplicants();
     fetchEmployees();
+  }
+
+  void selectOpeningDetail(Map<String, dynamic> detail) {
+    debugPrint("OPENING DETAIL KEYS: ${detail.keys.toList()}");
+    debugPrint("OPENING DETAIL JSON: ${jsonEncode(detail)}");
+    final detailShiftId = detail["schedule_shift_id"]?.toString() ??
+        detail["shift_id"]?.toString() ??
+        detail["id"]?.toString();
+    final detailLayerId = detail["opening_layer_daily_id"]?.toString() ??
+        detail["daily_opening_layer_id"]?.toString() ??
+        detail["opening_layer_id"]?.toString();
+    state = state.copyWith(
+      selectedOpeningDetail: detail,
+      selectedScheduleShiftId:
+          detailShiftId?.isNotEmpty == true ? detailShiftId : null,
+      selectedLayerId:
+          detailLayerId?.isNotEmpty == true ? detailLayerId : state.selectedLayerId,
+      applicants: const [],
+      employees: const [],
+      selectedEmployees: const [],
+    );
+    _ensureSelectionFromOpening(detail, refreshLists: true);
   }
 
   void toggleEmployee(Map<String, dynamic> employee) {
@@ -460,9 +475,11 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
   }
 
   Future<void> fetchApplicants() async {
-    final shiftId = _assignShiftId(state.selectedOpening, state.selectedScheduleShiftId);
-    final opening = state.selectedOpening;
+    final opening = state.selectedOpeningDetail ?? state.selectedOpening;
+    final shiftId =
+        _assignShiftId(opening, state.selectedScheduleShiftId);
     if (shiftId == null || opening == null || shiftId.isEmpty) return;
+    if (state.applicantsLoading) return;
 
     state = state.copyWith(applicantsLoading: true);
     try {
@@ -491,9 +508,11 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
   }
 
   Future<void> fetchEmployees() async {
-    final shiftId = _assignShiftId(state.selectedOpening, state.selectedScheduleShiftId);
-    final opening = state.selectedOpening;
+    final opening = state.selectedOpeningDetail ?? state.selectedOpening;
+    final shiftId =
+        _assignShiftId(opening, state.selectedScheduleShiftId);
     if (shiftId == null || opening == null || shiftId.isEmpty) return;
+    if (state.employeesLoading) return;
 
     state = state.copyWith(employeesLoading: true);
     try {
@@ -503,10 +522,6 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
         if (state.employeeSearch.isNotEmpty)
           "search": state.employeeSearch,
       };
-      final jobTitles = _jobTitleIdsForOpening(opening);
-      if (jobTitles.isNotEmpty) {
-        params["position_id"] = jobTitles;
-      }
       final resp = await _api.get(
         Endpoints.dailyScheduleAvailableEmployees(shiftId),
         params: params,
@@ -552,8 +567,8 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
     String? overrideJobTitleId,
     List<Map<String, dynamic>>? employees,
   }) async {
-    final shiftId = _assignShiftId(state.selectedOpening, state.selectedScheduleShiftId);
-    final opening = state.selectedOpening;
+    final opening = state.selectedOpeningDetail ?? state.selectedOpening;
+    final shiftId = _assignShiftId(opening, state.selectedScheduleShiftId);
     if (opening == null) {
       state = state.copyWith(actionError: "Missing opening data");
       print("Assign aborted: opening is null");
@@ -573,46 +588,52 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
 
     state = state.copyWith(actionLoading: true, actionError: null);
     try {
-      final openingId = _openingId(opening);
-      final layerId = state.selectedLayerId;
+      final scheduleShiftId = shiftId;
       final jobTitleId = overrideJobTitleId ??
           selected.first["job_title_id"]?.toString() ??
           _firstJobTitleId(opening);
-      if (openingId.isEmpty) {
-        state = state.copyWith(actionLoading: false, actionError: "Missing opening_daily_id");
-        print("Assign aborted: opening_daily_id is empty");
-        return false;
-      }
       if (jobTitleId == null || jobTitleId.isEmpty) {
         state = state.copyWith(actionLoading: false, actionError: "Missing job title");
         print("Assign aborted: job title is empty");
         return false;
       }
+      if (scheduleShiftId == null || scheduleShiftId.isEmpty) {
+        state = state.copyWith(
+          actionLoading: false,
+          actionError: "Missing schedule shift id",
+        );
+        print("Assign aborted: schedule shift id is empty");
+        return false;
+      }
 
-      final nurses = selected.map((e) {
+      final shifts = selected.map((e) {
         final empJobTitle =
             overrideJobTitleId ?? e["job_title_id"]?.toString();
         return {
-          "id": e["id"],
-          "job_title_id": empJobTitle,
+          "nurse_id": e["id"],
+          "schedule_shift_id": scheduleShiftId,
+          "job_title_id": empJobTitle ?? jobTitleId,
         };
       }).toList();
 
-      final payload = {
-        "nurses": nurses,
-        "opening_layer_daily_id": layerId ?? "",
-        "opening_daily_id": openingId,
-        "position": jobTitleId,
-        "is_backup": false,
-      };
+      final payload = {"shifts": shifts};
 
-      print("Assign endpoint: ${Endpoints.dailyScheduleAssignEmployees(shiftId)}");
+      print("Assign endpoint: ${Endpoints.dailyScheduleMultiAssign}");
       print("Assign payload: ${_stringifyData(payload)}");
 
-      await _api.patch(
-        Endpoints.dailyScheduleAssignEmployees(shiftId),
+      await _api.post(
+        Endpoints.dailyScheduleMultiAssign,
         data: payload,
       );
+
+      // Optimistic UI update so assigned employee shows immediately.
+      if (opening != null && selected.isNotEmpty) {
+        final updated = _optimisticAssign(opening, selected.first);
+        state = state.copyWith(
+          selectedOpeningDetail: updated,
+          selectedOpening: state.selectedOpening,
+        );
+      }
 
       state = state.copyWith(
         actionLoading: false,
@@ -648,7 +669,7 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
     state = state.copyWith(actionLoading: true);
     try {
       await _api.patch(
-        Endpoints.dailyScheduleUpdateOpening(openingId),
+        Endpoints.dailyScheduleShiftDetail(openingId),
         data: payload,
       );
       state = state.copyWith(actionLoading: false);
@@ -663,7 +684,27 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
   Future<bool> deleteOpening(String openingId) async {
     state = state.copyWith(actionLoading: true);
     try {
-      await _api.delete(Endpoints.dailyScheduleUpdateOpening(openingId));
+      final selected = state.selectedOpening;
+      final effectiveId =
+          selected?["effective_parent_id"]?.toString() ?? openingId;
+      if (effectiveId.isNotEmpty &&
+          selected?["created_from_opening"] != null) {
+        await _api.post(
+          Endpoints.dailyScheduleDeleteShift,
+          data: {
+            "effective_parent_ids": [
+              {
+                "id": effectiveId,
+                "created_from_opening":
+                    selected?["created_from_opening"] ?? false,
+              },
+            ],
+            "date": _formatDate(state.date),
+          },
+        );
+      } else {
+        await _api.delete(Endpoints.dailyScheduleUpdateOpening(openingId));
+      }
       state = state.copyWith(actionLoading: false);
       await fetchOpenings();
       return true;
@@ -685,12 +726,32 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
       debugPrint(
         "Unassign endpoint: ${Endpoints.dailyScheduleUnassignApplicant(openingDailyId, applicantId)}",
       );
-      await _api.patch(
+      debugPrint("Unassign payload: status=UNASSIGNED");
+      debugPrint(
+        "Unassign ids: openingDailyId=$openingDailyId applicantId=$applicantId",
+      );
+      final resp = await _api.patch(
         Endpoints.dailyScheduleUnassignApplicant(openingDailyId, applicantId),
         data: {"status": "UNASSIGNED"},
       );
+      debugPrint(
+        "Unassign response: ${resp.statusCode} ${_stringifyData(resp.data)}",
+      );
       state = state.copyWith(actionLoading: false, actionError: null);
       await fetchOpenings();
+      // Refresh the currently selected opening detail so UI updates immediately.
+      final current = state.selectedOpening;
+      if (current != null) {
+        await _loadShiftDetails(current);
+      }
+      if (state.selectedOpeningDetail != null) {
+        state = state.copyWith(
+          selectedOpeningDetail: _optimisticUnassign(
+            state.selectedOpeningDetail!,
+            applicantId,
+          ),
+        );
+      }
       await fetchApplicants();
       await fetchEmployees();
       return true;
@@ -741,6 +802,21 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
       shiftId = _firstScheduleShiftId(layer) ?? shiftId;
     }
     shiftId ??= _openingScheduleShiftId(opening);
+    if (shiftId == null || shiftId.isEmpty) {
+      final details = opening["shift_details"];
+      if (details is List && details.isNotEmpty) {
+        final first = details.first;
+        if (first is Map) {
+          shiftId = first["schedule_shift_id"]?.toString() ??
+              first["shift_id"]?.toString() ??
+              first["id"]?.toString();
+        }
+      } else if (details is Map) {
+        shiftId = details["schedule_shift_id"]?.toString() ??
+            details["shift_id"]?.toString() ??
+            details["id"]?.toString();
+      }
+    }
 
     state = state.copyWith(
       selectedLayerId: layerId,
@@ -773,6 +849,183 @@ class DailyScheduleController extends StateNotifier<DailyScheduleState> {
       }
     }
   }
+
+  Future<bool> updateApplicantStatus({
+    required String applicantId,
+    required String openingDailyId,
+    String? openingLayerDailyId,
+    required String status,
+  }) async {
+    if (applicantId.isEmpty || openingDailyId.isEmpty) return false;
+    state = state.copyWith(actionLoading: true, actionError: null);
+    try {
+      final payload = {
+        "opening_daily_id": openingDailyId,
+        if (openingLayerDailyId != null && openingLayerDailyId.isNotEmpty)
+          "opening_layer_daily_id": openingLayerDailyId,
+        "status": status,
+      };
+      debugPrint("Update applicant endpoint: ${Endpoints.dailyScheduleUpdateApplicant(applicantId)}");
+      debugPrint("Update applicant payload: ${jsonEncode(payload)}");
+      final resp = await _api.patch(
+        Endpoints.dailyScheduleUpdateApplicant(applicantId),
+        data: payload,
+      );
+      debugPrint(
+        "Update applicant response: ${resp.statusCode} ${_stringifyData(resp.data)}",
+      );
+      state = state.copyWith(actionLoading: false, actionError: null);
+      await fetchOpenings();
+      return true;
+    } catch (e) {
+      final message = _errorMessage(e) ?? e.toString();
+      state = state.copyWith(actionLoading: false, actionError: message);
+      debugPrint("Update applicant failed: $message");
+      return false;
+    }
+  }
+
+  Future<bool> updateApplicantStatusV2({
+    required String openingDailyId,
+    required String applicantId,
+    required String status,
+  }) async {
+    if (openingDailyId.isEmpty || applicantId.isEmpty) return false;
+    state = state.copyWith(actionLoading: true, actionError: null);
+    try {
+      final payload = {"status": status};
+      debugPrint(
+        "Update applicant v2 endpoint: ${Endpoints.dailyScheduleUnassignApplicant(openingDailyId, applicantId)}",
+      );
+      debugPrint("Update applicant v2 payload: ${jsonEncode(payload)}");
+      final resp = await _api.patch(
+        Endpoints.dailyScheduleUnassignApplicant(openingDailyId, applicantId),
+        data: payload,
+      );
+      debugPrint(
+        "Update applicant v2 response: ${resp.statusCode} ${_stringifyData(resp.data)}",
+      );
+      state = state.copyWith(actionLoading: false, actionError: null);
+      await fetchOpenings();
+      return true;
+    } catch (e) {
+      final message = _errorMessage(e) ?? e.toString();
+      state = state.copyWith(actionLoading: false, actionError: message);
+      debugPrint("Update applicant v2 failed: $message");
+      return false;
+    }
+  }
+
+  void applyLocalTransfer({
+    required String fromOpeningId,
+    required String toOpeningId,
+    required Map<String, dynamic> employee,
+  }) {
+    final opening = state.selectedOpening;
+    if (opening == null) return;
+    final details = opening["shift_details"];
+    if (details is! List) return;
+
+    List<dynamic> updatedDetails = details.map((item) {
+      if (item is! Map) return item;
+      final mapped = Map<String, dynamic>.from(item);
+      final id = _openingId(mapped);
+      if (id == fromOpeningId) {
+        mapped["applicants"] = _removeApplicant(mapped["applicants"], employee);
+      } else if (id == toOpeningId) {
+        mapped["applicants"] = _addApplicant(mapped["applicants"], employee);
+      }
+      return mapped;
+    }).toList();
+
+    final updatedOpening = {
+      ...opening,
+      "shift_details": updatedDetails,
+    };
+
+    Map<String, dynamic>? updatedDetail = state.selectedOpeningDetail;
+    if (updatedDetail != null) {
+      final detailId = _openingId(updatedDetail);
+      if (detailId == fromOpeningId || detailId == toOpeningId) {
+        for (final item in updatedDetails) {
+          if (item is! Map) continue;
+          final id = _openingId(Map<String, dynamic>.from(item));
+          if (id == detailId) {
+            updatedDetail = Map<String, dynamic>.from(item);
+            break;
+          }
+        }
+      }
+    }
+
+    state = state.copyWith(
+      selectedOpening: updatedOpening,
+      selectedOpeningDetail: updatedDetail,
+    );
+  }
+
+  Future<void> _loadShiftDetails(Map<String, dynamic> summary) async {
+    final shiftId = _shiftSummaryId(summary);
+    if (shiftId.isEmpty) {
+      _ensureSelectionFromOpening(summary, refreshLists: true);
+      return;
+    }
+    state = state.copyWith(detailsLoading: true);
+    try {
+      final resp = await _api.get(
+        Endpoints.dailyScheduleShiftDetail(shiftId),
+        params: {"date": _formatDate(state.date)},
+      );
+      var list = _extractList(resp.data);
+      if (list.isEmpty && resp.data is Map<String, dynamic>) {
+        final data = resp.data["data"];
+        if (data is Map && data["shift_details"] is List) {
+          list = data["shift_details"] as List;
+        }
+      }
+      final details = list
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      final totalOpenings = details.length;
+      final filledOpenings = _filledOpeningsCount(details);
+      final enriched = {
+        ...summary,
+        "schedule_shift_id": summary["schedule_shift_id"]?.toString() ?? shiftId,
+        "shift_details": details,
+        "mobile_total_count": totalOpenings,
+        "mobile_filled_count": filledOpenings,
+      };
+      final selectedDetail =
+          _detailForShiftMap(enriched, state.selectedScheduleShiftId);
+      state = state.copyWith(
+        selectedOpening: _mergeMobileCounts(enriched, totalOpenings, filledOpenings),
+        selectedOpeningDetail: selectedDetail,
+        detailsLoading: false,
+      );
+      _mergeCountsIntoOpenings(shiftId, totalOpenings, filledOpenings);
+      _ensureSelectionFromOpening(enriched, refreshLists: true);
+    } catch (_) {
+      state = state.copyWith(detailsLoading: false);
+      _ensureSelectionFromOpening(summary, refreshLists: true);
+    }
+  }
+
+  void _mergeCountsIntoOpenings(String shiftId, int total, int filled) {
+    if (state.openings.isEmpty) return;
+    final updated = state.openings.map((opening) {
+      final id = _shiftSummaryId(opening);
+      if (id == shiftId) {
+        return {
+          ...opening,
+          "mobile_total_count": total,
+          "mobile_filled_count": filled,
+        };
+      }
+      return opening;
+    }).toList();
+    state = state.copyWith(openings: updated);
+  }
 }
 
 List<dynamic> _extractList(dynamic data) {
@@ -795,6 +1048,7 @@ String _formatDate(DateTime date) {
 
 String _openingId(Map<String, dynamic> opening) {
   return opening["opening_daily_id"]?.toString() ??
+      opening["effective_parent_id"]?.toString() ??
       opening["daily_opening_id"]?.toString() ??
       opening["daily_opening"]?.toString() ??
       opening["opening_daily"]?.toString() ??
@@ -856,10 +1110,119 @@ String _stringifyData(Object data) {
   }
 }
 
+List<dynamic> _removeApplicant(dynamic applicants, Map<String, dynamic> employee) {
+  if (applicants is! List) return applicants is List ? applicants : [];
+  final empId = employee["id"]?.toString() ??
+      employee["employee_id"]?.toString() ??
+      employee["nurse_id"]?.toString();
+  if (empId == null || empId.isEmpty) return applicants;
+  return applicants.where((item) {
+    if (item is! Map) return true;
+    final nurse = item["nurse"];
+    String? id;
+    if (nurse is Map) {
+      id = nurse["id"]?.toString() ??
+          nurse["employee_id"]?.toString() ??
+          nurse["nurse_id"]?.toString();
+    }
+    id ??= item["employee_id"]?.toString() ?? item["nurse_id"]?.toString();
+    return id != empId;
+  }).toList();
+}
+
+List<dynamic> _addApplicant(dynamic applicants, Map<String, dynamic> employee) {
+  final list = applicants is List ? [...applicants] : <dynamic>[];
+  final nurse = {
+    "id": employee["id"],
+    "first_name": employee["first_name"],
+    "last_name": employee["last_name"],
+    "job_title": employee["job_title"],
+  };
+  list.insert(0, {
+    "applicant_id": "temp-${employee["id"]}",
+    "status": "ACCEPTED",
+    "is_assigned": true,
+    "nurse": nurse,
+  });
+  return list;
+}
+
+Map<String, dynamic> _optimisticUnassign(
+  Map<String, dynamic> openingDetail,
+  String applicantId,
+) {
+  final copy = Map<String, dynamic>.from(openingDetail);
+  final details = copy["shift_details"];
+  if (details is List) {
+    copy["shift_details"] = details.map((d) {
+      if (d is! Map) return d;
+      final mapped = Map<String, dynamic>.from(d);
+      final applicants = (mapped["applicants"] as List?) ?? [];
+      mapped["applicants"] = applicants.where((a) {
+        if (a is! Map) return true;
+        final id = a["applicant_id"]?.toString() ?? a["id"]?.toString();
+        return id != applicantId;
+      }).toList();
+      return mapped;
+    }).toList();
+  }
+  return copy;
+}
+
+Map<String, dynamic> _optimisticAssign(
+  Map<String, dynamic> openingDetail,
+  Map<String, dynamic> employee,
+) {
+  final copy = Map<String, dynamic>.from(openingDetail);
+  final details = copy["shift_details"];
+  final nurse = {
+    "id": employee["id"],
+    "first_name": employee["first_name"],
+    "last_name": employee["last_name"],
+    "job_title": employee["job_title"],
+  };
+  final applicant = {
+    "applicant_id": "temp-${employee["id"]}",
+    "status": "ACCEPTED",
+    "is_assigned": true,
+    "nurse": nurse,
+  };
+  if (details is List && details.isNotEmpty) {
+    final first = details.first;
+    if (first is Map) {
+      final mapped = Map<String, dynamic>.from(first);
+      final applicants = (mapped["applicants"] as List?) ?? [];
+      mapped["applicants"] = [applicant, ...applicants];
+      copy["shift_details"] = [mapped, ...details.skip(1)];
+    }
+  } else if (details is Map) {
+    final mapped = Map<String, dynamic>.from(details);
+    final applicants = (mapped["applicants"] as List?) ?? [];
+    mapped["applicants"] = [applicant, ...applicants];
+    copy["shift_details"] = mapped;
+  }
+  return copy;
+}
+
 String? _openingScheduleShiftId(Map<String, dynamic> opening) {
   final direct = opening["schedule_shift_id"]?.toString() ??
       opening["shift_id"]?.toString();
   if (direct != null && direct.isNotEmpty) return direct;
+  final detail = opening["shift_details"];
+  if (detail is List && detail.isNotEmpty) {
+    final first = detail.first;
+    if (first is Map) {
+      final candidate = first["schedule_shift_id"]?.toString() ??
+          first["shift_id"]?.toString() ??
+          first["id"]?.toString();
+      if (candidate != null && candidate.isNotEmpty) return candidate;
+    }
+  } else if (detail is Map) {
+    final candidate = detail["schedule_shift_id"]?.toString() ??
+        detail["shift_id"]?.toString() ??
+        detail["id"]?.toString();
+    if (candidate != null && candidate.isNotEmpty) return candidate;
+  }
   final details = opening["shift_details"];
   if (details is Map) {
     return details["shift_id"]?.toString() ??
@@ -877,6 +1240,42 @@ String? _openingScheduleShiftId(Map<String, dynamic> opening) {
   return null;
 }
 
+String _shiftSummaryId(Map<String, dynamic> opening) {
+  return opening["effective_parent_id"]?.toString() ??
+      opening["schedule_shift_id"]?.toString() ??
+      opening["shift_id"]?.toString() ??
+      opening["id"]?.toString() ??
+      "";
+}
+
+Map<String, dynamic> _normalizeShiftSummary(Map<String, dynamic> opening) {
+  if (opening["opening_daily_id"] == null &&
+      opening["effective_parent_id"] != null) {
+    opening["opening_daily_id"] = opening["effective_parent_id"].toString();
+  }
+  if (opening["name"] == null && opening["parent_name"] != null) {
+    opening["name"] = opening["parent_name"];
+  }
+  return opening;
+}
+
+List<Map<String, dynamic>> _deriveDepartmentsFromOpenings(
+  List<Map<String, dynamic>> openings,
+) {
+  final map = <String, Map<String, dynamic>>{};
+  for (final opening in openings) {
+    final dept = opening["department"];
+    final id = dept is Map ? dept["id"]?.toString() : null;
+    final name = dept is Map ? dept["name"]?.toString() : null;
+    if (id == null || name == null) continue;
+    map.putIfAbsent(id, () => {"id": id, "name": name});
+  }
+  final list = map.values.toList();
+  list.sort((a, b) => (a["name"]?.toString() ?? "")
+      .compareTo(b["name"]?.toString() ?? ""));
+  return list;
+}
+
 List<String> _jobTitleIdsForOpening(Map<String, dynamic> opening) {
   final jobTitles = (opening["job_titles"] as List?)
           ?.whereType<Map>()
@@ -885,6 +1284,42 @@ List<String> _jobTitleIdsForOpening(Map<String, dynamic> opening) {
           .toList() ??
       [];
   if (jobTitles.isNotEmpty) return jobTitles;
+  final shiftDetails = opening["shift_details"];
+  if (shiftDetails is List) {
+    final ids = <String>[];
+    for (final detail in shiftDetails) {
+      if (detail is! Map) continue;
+      final titles = (detail["job_titles"] as List?)
+              ?.whereType<Map>()
+              .map((e) => e["id"]?.toString())
+              .whereType<String>() ??
+          const [];
+      ids.addAll(titles);
+      final positions = (detail["shift_positions"] as List?)
+              ?.whereType<Map>()
+              .map((e) => e["job_title_id"]?.toString())
+              .whereType<String>() ??
+          const [];
+      ids.addAll(positions);
+    }
+    final unique = ids.where((e) => e.isNotEmpty).toSet().toList();
+    if (unique.isNotEmpty) return unique;
+  } else if (shiftDetails is Map) {
+    final titles = (shiftDetails["job_titles"] as List?)
+            ?.whereType<Map>()
+            .map((e) => e["id"]?.toString())
+            .whereType<String>()
+            .toList() ??
+        [];
+    if (titles.isNotEmpty) return titles;
+    final positions = (shiftDetails["shift_positions"] as List?)
+            ?.whereType<Map>()
+            .map((e) => e["job_title_id"]?.toString())
+            .whereType<String>()
+            .toList() ??
+        [];
+    if (positions.isNotEmpty) return positions;
+  }
   final shiftPositions = (opening["shift_positions"] as List?)
           ?.whereType<Map>()
           .map((e) => e["job_title_id"]?.toString())
@@ -899,6 +1334,29 @@ String _firstJobTitleId(Map<String, dynamic> opening) {
   if (titles.isEmpty) return "";
   if (titles.first is Map) {
     return (titles.first as Map)["id"]?.toString() ?? "";
+  }
+  final details = opening["shift_details"];
+  if (details is List && details.isNotEmpty) {
+    final first = details.first;
+    if (first is Map) {
+      final nestedTitles = (first["job_titles"] as List?) ?? [];
+      if (nestedTitles.isNotEmpty && nestedTitles.first is Map) {
+        return (nestedTitles.first as Map)["id"]?.toString() ?? "";
+      }
+      final positions = (first["shift_positions"] as List?) ?? [];
+      if (positions.isNotEmpty && positions.first is Map) {
+        return (positions.first as Map)["job_title_id"]?.toString() ?? "";
+      }
+    }
+  } else if (details is Map) {
+    final nestedTitles = (details["job_titles"] as List?) ?? [];
+    if (nestedTitles.isNotEmpty && nestedTitles.first is Map) {
+      return (nestedTitles.first as Map)["id"]?.toString() ?? "";
+    }
+    final positions = (details["shift_positions"] as List?) ?? [];
+    if (positions.isNotEmpty && positions.first is Map) {
+      return (positions.first as Map)["job_title_id"]?.toString() ?? "";
+    }
   }
   return "";
 }
@@ -926,5 +1384,56 @@ String? _firstScheduleShiftId(Map<String, dynamic> layer) {
   }
   return null;
 }
+
+Map<String, dynamic>? _detailForShiftMap(
+  Map<String, dynamic> opening,
+  String? shiftId,
+) {
+  final details = opening["shift_details"];
+  if (details is Map<String, dynamic>) return details;
+  if (details is List && details.isNotEmpty) {
+    if (shiftId != null && shiftId.isNotEmpty) {
+      for (final item in details) {
+        if (item is! Map) continue;
+        final id = item["shift_id"]?.toString() ??
+            item["id"]?.toString() ??
+            item["schedule_id"]?.toString() ??
+            item["schedule_shift_id"]?.toString();
+        if (id == shiftId) return Map<String, dynamic>.from(item);
+      }
+    }
+    final first = details.first;
+    if (first is Map) return Map<String, dynamic>.from(first);
+  }
+  return null;
+}
+
+int _filledOpeningsCount(List<Map<String, dynamic>> details) {
+  int filled = 0;
+  for (final detail in details) {
+    final applicants = (detail["applicants"] as List?) ?? [];
+    final hasAssigned = applicants.any((a) {
+      if (a is! Map) return false;
+      final status = a["status"]?.toString().toUpperCase();
+      final assigned = a["is_assigned"] == true;
+      return status == "ACCEPTED" || assigned;
+    });
+    if (hasAssigned) filled += 1;
+  }
+  return filled;
+}
+
+Map<String, dynamic> _mergeMobileCounts(
+  Map<String, dynamic> opening,
+  int total,
+  int filled,
+) {
+  return {
+    ...opening,
+    "mobile_total_count": total,
+    "mobile_filled_count": filled,
+  };
+}
+
 
 

@@ -17,12 +17,83 @@ class Endpoints {
   static const employeeInviteAction = "facilities/employees";
   static String employeeWageHistory(String employeeId) =>
       "facilities/employees/$employeeId/wage-history";
+  static String employeeActiveShift(String employeeId) =>
+      "facilities/employees/$employeeId/active-shift/";
+  static String employeePaymentHistory(String employeeId) =>
+      "facilities/employees/$employeeId/payment-history";
+  static String employeePendingPayments(String employeeId) =>
+      "facilities/employees/$employeeId/pending-payments";
+  static String employeePaymentDetail(String paymentId) =>
+      "facilities/payment/$paymentId";
+  static String employeeDependents(String employeeId) =>
+      "facilities/employees/$employeeId/dependents/";
+  static String employeeDependentsLegacy(String employeeId) =>
+      "facilities/employees/$employeeId/dependent/";
+  static String employeeW4Form(String employeeId) =>
+      "facilities/employees/$employeeId/w4-form/";
+  static String employeeW4FormPatch(String employeeId, String w4Id) =>
+      "facilities/employees/$employeeId/w4-form/$w4Id/";
+  static String employeeTaxForms(String employeeId) =>
+      "facilities/employees/$employeeId/tax-forms/";
+  static String employeeTaxFormsRefresh(String employeeId) =>
+      "facilities/employees/$employeeId/tax-forms/refresh/";
+  static String employeeTaxFormPatch(String employeeId, String formId) =>
+      "facilities/employees/$employeeId/tax-forms/$formId/";
+  static String employeeWorkHistory(String employeeId) =>
+      "facilities/employees/$employeeId/work-history";
+  static String employeeWorkHistoryWithParams(
+    String employeeId,
+    String params,
+  ) =>
+      "facilities/employees/$employeeId/work-history?$params";
+  static String employeePayDetails(String employeeId) =>
+      "facilities/employees/$employeeId/pay-details/";
+  static String employeeW2Years(String employeeId) =>
+      "common/w2form-nurses-years/$employeeId";
+  static String employeeW2Compute(String employeeId) =>
+      "facilities/employees/$employeeId/w2form/compute";
+  static String employeeW2Form(String employeeId, String yearId) =>
+      "facilities/employees/$employeeId/w2form/$yearId";
+  static String employeeCredentials(String employeeId) =>
+      "facility/employees/$employeeId/credentials";
+  static String employeeCredentialPatch(String credentialId) =>
+      "facilities/employees/credential/$credentialId";
+  static String employeeCredentialStatus(String credentialId) =>
+      "facilities/employees/credential/$credentialId/action";
+  static String employeeCredentialExpiry(String employeeId, String credentialId) =>
+      "facilities/employees/$employeeId/credential/expiry/$credentialId";
   static const jobTitles = "common/job-titles";
   static const schedulers = "facilities/scheduler/";
   static const supervisors = "facilities/supervisor/";
+  static const employeesBulkValidate = "facilities/employees/bulk/validate";
+  static const employeesBulkInvite = "facilities/employees/bulk/invite";
+  static const employeesBulkInviteManual =
+      "facilities/employees/bulk/invite-manually";
+  static const walkInEmployees = "facilities/walk-in-employees/";
+  static String walkInEmployee(String id) => "facilities/walk-in-employees/$id/";
+  static String walkInAssign(String shiftId) =>
+      "facilities/shifts/$shiftId/walk-in-employees/";
+  static String walkInAvailableEmployees(String shiftId) =>
+      "facilities/shifts/$shiftId/walk-in-employees/available/";
+  static String walkInClockInOut(String shiftApplicantId) =>
+      "facilities/walk-in-employees/$shiftApplicantId/clock-in-clock-out/";
+  static String walkInWorkHistory(String employeeId) =>
+      "facilities/walk-in-employees/$employeeId/work-history/";
+  static const fetchCountries = "common/country";
+  static String fetchStates(String countryId) => "common/state/$countryId";
 
   // Daily schedule (web parity)
-  static const dailyScheduleOpenings = "facilities/daily-opening-v2-new/";
+  static const dailyScheduleOpenings = "facilities/daily-opening-v4/";
+  static String dailyScheduleShiftDetail(String id) =>
+      "facilities/daily-opening-v4/$id/";
+  static const dailyScheduleDeleteShift =
+      "facilities/daily-opening-v4/confirm_delete/";
+  static const dailyScheduleUpdateTimings =
+      "facilities/daily-opening-v4/update-timings/";
+  static const dailyScheduleMultiAssign =
+      "facilities/daily-opening-v4/multi-assign/";
+  static String dailyScheduleOpeningCounts(String params) =>
+      "facilities/daily-opening-v4/daily-opening-counts/?$params";
   static const dailyScheduleStats = "facilities/daily-opening/stats/";
   static const dailyScheduleJobTitleConflict =
       "facilities/daily-opening-v2/job-title-conflict";
@@ -43,6 +114,8 @@ class Endpoints {
       "facilities/shifts/$shiftId/employees-available";
   static String dailyScheduleAssignEmployees(String shiftId) =>
       "facilities/daily-opening-v2/shifts/$shiftId/employees-v2/";
+  static String dailyScheduleUpdateApplicant(String applicantId) =>
+      "facilities/daily-opening/applicant/$applicantId/";
   static String dailyScheduleUnassignApplicant(
     String openingDailyId,
     String applicantId,

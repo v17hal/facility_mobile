@@ -120,6 +120,21 @@ class _EmployeeFormScreenState extends ConsumerState<EmployeeFormScreen> {
     final filters = ref.watch(employeesControllerProvider);
     final jobTitles = filters.jobTitles;
     final departments = filters.departments;
+    final statusOptions = const [
+      "ACTIVE",
+      "INVITED",
+      "BLOCKED",
+      "TERMINATED",
+      "REINITIATED",
+    ];
+    final statusValue = statusOptions.contains(status) ? status : null;
+    final jobTitleValue = jobTitles.any((t) => t["id"]?.toString() == jobTitleId)
+        ? jobTitleId
+        : null;
+    final departmentValue =
+        departments.any((d) => d["id"]?.toString() == departmentId)
+            ? departmentId
+            : null;
 
     return Scaffold(
       appBar: AppBar(
@@ -182,7 +197,8 @@ class _EmployeeFormScreenState extends ConsumerState<EmployeeFormScreen> {
               const SizedBox(height: 12),
               _FieldLabel("Job Title"),
               DropdownButtonFormField<String>(
-                value: jobTitleId,
+                isExpanded: true,
+                value: jobTitleValue,
                 items: jobTitles
                     .map(
                       (t) => DropdownMenuItem(
@@ -199,7 +215,8 @@ class _EmployeeFormScreenState extends ConsumerState<EmployeeFormScreen> {
               const SizedBox(height: 12),
               _FieldLabel("Department"),
               DropdownButtonFormField<String>(
-                value: departmentId,
+                isExpanded: true,
+                value: departmentValue,
                 items: departments
                     .map(
                       (d) => DropdownMenuItem(
@@ -216,12 +233,16 @@ class _EmployeeFormScreenState extends ConsumerState<EmployeeFormScreen> {
               const SizedBox(height: 12),
               _FieldLabel("Status"),
               DropdownButtonFormField<String>(
-                value: status,
+                value: statusValue,
                 items: const [
                   DropdownMenuItem(value: "ACTIVE", child: Text("Active")),
                   DropdownMenuItem(value: "INVITED", child: Text("Invited")),
                   DropdownMenuItem(value: "BLOCKED", child: Text("Blocked")),
                   DropdownMenuItem(value: "TERMINATED", child: Text("Terminated")),
+                  DropdownMenuItem(
+                    value: "REINITIATED",
+                    child: Text("Reinitiated"),
+                  ),
                 ],
                 onChanged: (value) {
                   if (value != null) setState(() => status = value);

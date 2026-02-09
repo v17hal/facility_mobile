@@ -5,6 +5,8 @@ import "package:flutter_riverpod/flutter_riverpod.dart";
 import "../../core/network/api_provider.dart";
 import "../../core/network/api_service.dart";
 import "../../core/network/endpoints.dart";
+import "../../core/storage/secure_store.dart";
+import "../../core/storage/storage_keys.dart";
 
 enum EmployeesTab {
   active,
@@ -35,6 +37,9 @@ class EmployeesState {
     this.supervisors = const [],
     this.schedulers = const [],
     this.secondaryLoading = false,
+    this.facilities = const [],
+    this.selectedFacilityId,
+    this.selectedFacilityName,
   });
 
   final EmployeesTab activeTab;
@@ -54,6 +59,9 @@ class EmployeesState {
   final List<Map<String, dynamic>> supervisors;
   final List<Map<String, dynamic>> schedulers;
   final bool secondaryLoading;
+  final List<Map<String, dynamic>> facilities;
+  final String? selectedFacilityId;
+  final String? selectedFacilityName;
 
   bool get hasMore => employees.length < total;
 
@@ -75,6 +83,9 @@ class EmployeesState {
     List<Map<String, dynamic>>? supervisors,
     List<Map<String, dynamic>>? schedulers,
     bool? secondaryLoading,
+    List<Map<String, dynamic>>? facilities,
+    String? selectedFacilityId,
+    String? selectedFacilityName,
   }) {
     return EmployeesState(
       activeTab: activeTab ?? this.activeTab,
@@ -94,6 +105,9 @@ class EmployeesState {
       supervisors: supervisors ?? this.supervisors,
       schedulers: schedulers ?? this.schedulers,
       secondaryLoading: secondaryLoading ?? this.secondaryLoading,
+      facilities: facilities ?? this.facilities,
+      selectedFacilityId: selectedFacilityId ?? this.selectedFacilityId,
+      selectedFacilityName: selectedFacilityName ?? this.selectedFacilityName,
     );
   }
 }
@@ -101,16 +115,19 @@ class EmployeesState {
 final employeesControllerProvider =
     StateNotifierProvider<EmployeesController, EmployeesState>((ref) {
   final api = ApiService(ref.watch(apiClientProvider));
-  return EmployeesController(api);
+  final store = ref.watch(secureStoreProvider);
+  return EmployeesController(api, store);
 });
 
 class EmployeesController extends StateNotifier<EmployeesState> {
-  EmployeesController(this._api) : super(const EmployeesState()) {
+  EmployeesController(this._api, this._store) : super(const EmployeesState()) {
     _loadFilters();
+    _loadFacilities();
     fetchEmployees(reset: true);
   }
 
   final ApiService _api;
+  final SecureStore _store;
   Timer? _debounce;
 
   @override
@@ -349,6 +366,57 @@ class EmployeesController extends StateNotifier<EmployeesState> {
           .toList();
       state = state.copyWith(departments: mapped);
     } catch (_) {}
+  }
+
+  Future<void> _loadFacilities() async {
+    try {
+      final resp = await _api.get("owner/facility/list");
+      final list = resp.data is Map<String, dynamic>
+          ? (resp.data["data"] as List? ?? [])
+          : (resp.data as List? ?? []);
+      final mapped = list
+          .whereType<Map>()
+          .map((e) => {
+                "id": e["id"]?.toString(),
+                "name": e["name"]?.toString() ?? "",
+              })
+          .cast<Map<String, dynamic>>()
+          .toList();
+
+      final currentId = await _store.read(StorageKeys.facilityId);
+      final currentName = await _store.read(StorageKeys.facilityName);
+
+      String? selectedId = currentId;
+      String? selectedName = currentName;
+
+      if ((selectedId == null || selectedId.isEmpty) && mapped.isNotEmpty) {
+        selectedId = mapped.first["id"]?.toString();
+        selectedName = mapped.first["name"]?.toString();
+        if (selectedId != null) {
+          await _store.write(StorageKeys.facilityId, selectedId);
+        }
+        if (selectedName != null) {
+          await _store.write(StorageKeys.facilityName, selectedName);
+        }
+      }
+
+      state = state.copyWith(
+        facilities: mapped,
+        selectedFacilityId: selectedId,
+        selectedFacilityName: selectedName,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> selectFacility(String id, String name) async {
+    await _store.write(StorageKeys.facilityId, id);
+    await _store.write(StorageKeys.facilityName, name);
+    state = state.copyWith(selectedFacilityId: id, selectedFacilityName: name);
+    if (_isSecondaryTab(state.activeTab)) {
+      fetchSecondary();
+    } else {
+      fetchEmployees(reset: true);
+    }
   }
 }
 

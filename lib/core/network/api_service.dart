@@ -13,7 +13,7 @@ class ApiService {
 
   Future<Response<dynamic>> post(
     String path, {
-    Map<String, dynamic>? data,
+    dynamic data,
     Map<String, dynamic>? params,
   }) {
     return _client.dio.post(path, data: data, queryParameters: params);
@@ -21,7 +21,7 @@ class ApiService {
 
   Future<Response<dynamic>> patch(
     String path, {
-    Map<String, dynamic>? data,
+    dynamic data,
     Map<String, dynamic>? params,
   }) {
     return _client.dio.patch(path, data: data, queryParameters: params);
@@ -29,7 +29,7 @@ class ApiService {
 
   Future<Response<dynamic>> delete(
     String path, {
-    Map<String, dynamic>? data,
+    dynamic data,
     Map<String, dynamic>? params,
   }) {
     return _client.dio.delete(path, data: data, queryParameters: params);

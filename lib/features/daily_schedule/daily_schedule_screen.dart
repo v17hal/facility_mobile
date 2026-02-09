@@ -2098,6 +2098,7 @@ class _PositionDetail extends StatelessWidget {
   const _PositionDetail({
 
     required this.opening,
+    required this.countsSource,
     required this.controller,
 
     required this.selectedLayerId,
@@ -2139,6 +2140,7 @@ class _PositionDetail extends StatelessWidget {
 
 
   final Map<String, dynamic> opening;
+  final Map<String, dynamic>? countsSource;
   final DailyScheduleController controller;
 
   final String? selectedLayerId;
@@ -2192,11 +2194,80 @@ class _PositionDetail extends StatelessWidget {
         _maxSelectableForOpening(opening, selectedShiftId);
     final assignedEmployees =
         _assignedEmployeesForOpening(opening, selectedShiftId);
-    final counts = _positionCountsForOpening(
-      opening,
-      selectedShiftId,
-      assignedEmployees.length,
-    );
+    final applicantIdByEmployeeId = <String, String>{};
+    final applicantsRaw = (opening["applicants"] as List?) ?? [];
+    for (final item in applicantsRaw) {
+      if (item is! Map) continue;
+      final applicantId = item["applicant_id"]?.toString() ??
+          item["id"]?.toString();
+      if (applicantId == null || applicantId.isEmpty) continue;
+      final nurse = item["nurse"];
+      final nurseId = nurse is Map
+          ? (nurse["id"]?.toString() ??
+              nurse["employee_id"]?.toString() ??
+              nurse["nurse_id"]?.toString())
+          : null;
+      final directEmployeeId = item["employee_id"]?.toString() ??
+          item["nurse_id"]?.toString();
+      final key = nurseId ?? directEmployeeId;
+      if (key != null && key.isNotEmpty) {
+        applicantIdByEmployeeId[key] = applicantId;
+      }
+    }
+    final counts = _shiftCountsForOpening(countsSource ?? opening);
+    final currentOpeningId = _openingId(opening);
+    final transferMap = <String, Map<String, String>>{};
+    final source = countsSource ?? opening;
+    final currentStart = opening["start_time"]?.toString();
+    final currentEnd = opening["end_time"]?.toString();
+    final detailList = source["shift_details"];
+    if (detailList is List) {
+      for (final item in detailList) {
+        if (item is! Map) continue;
+        final detail = Map<String, dynamic>.from(item);
+        final detailId = _openingId(detail);
+        final detailOpeningDailyId = detail["opening_daily_id"]?.toString() ??
+            detail["daily_opening_id"]?.toString() ??
+            detail["opening_daily"]?.toString() ??
+            detailId;
+        final detailScheduleShiftId = detail["schedule_shift_id"]?.toString() ??
+            detail["shift_id"]?.toString() ??
+            detail["id"]?.toString() ??
+            "";
+        if (detailId.isEmpty || detailId == currentOpeningId) continue;
+        final sameTime =
+            (detail["start_time"]?.toString() == currentStart) &&
+                (detail["end_time"]?.toString() == currentEnd);
+        if (!sameTime) continue;
+        final applicants = (detail["applicants"] as List?) ?? [];
+        for (final applicant in applicants) {
+          if (applicant is! Map) continue;
+          final status = applicant["status"]?.toString().toUpperCase();
+          final assigned = applicant["is_assigned"] == true;
+          if (status != "ACCEPTED" && !assigned) continue;
+          final nurse = applicant["nurse"];
+          String? empId;
+          if (nurse is Map) {
+            empId = nurse["id"]?.toString() ??
+                nurse["employee_id"]?.toString() ??
+                nurse["nurse_id"]?.toString();
+          }
+          empId ??= applicant["employee_id"]?.toString() ??
+              applicant["nurse_id"]?.toString();
+          if (empId == null || empId.isEmpty) continue;
+          final applicantId = applicant["applicant_id"]?.toString() ??
+              applicant["id"]?.toString() ??
+              "";
+          if (applicantId.isEmpty) continue;
+          transferMap[empId] = {
+            "applicantId": applicantId,
+            "openingId": detailId,
+            "openingDailyId": detailOpeningDailyId,
+            "scheduleShiftId": detailScheduleShiftId,
+          };
+        }
+      }
+    }
     final assignedIds = assignedEmployees
         .map(_employeeIdFromMap)
         .whereType<String>()
@@ -2311,13 +2382,15 @@ class _PositionDetail extends StatelessWidget {
           const SizedBox(height: 10),
           _SectionHeader(title: "Assigned"),
           const SizedBox(height: 8),
-          if (assignedEmployees.isEmpty)
-            const Text("No assigned employees found.")
-          else
+          if (assignedEmployees.isNotEmpty)
             ...assignedEmployees.map((employee) {
               final name = _employeeName(employee);
               final role = _employeeRole(employee);
-              final applicantId = _employeeApplicantId(employee);
+              final employeeId = _employeeIdFromMap(employee);
+              final applicantId = _employeeApplicantId(employee) ??
+                  (employeeId != null
+                      ? applicantIdByEmployeeId[employeeId]
+                      : null);
               final openingDailyId = _openingId(opening);
               return Container(
                 margin: const EdgeInsets.only(bottom: 8),
@@ -2409,7 +2482,7 @@ class _PositionDetail extends StatelessWidget {
           const SizedBox(height: 12),
           _SectionHeader(title: "Available"),
           const SizedBox(height: 8),
-          if (maxSelectable <= 0)
+          if (employees.isEmpty && maxSelectable <= 0)
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
@@ -2428,8 +2501,54 @@ class _PositionDetail extends StatelessWidget {
                 search: employeeSearch,
                 onSearch: onEmployeeSearch,
                 onAssignEmployee: handleAssignSingle,
-                assignDisabled: maxSelectable <= 0 || isFull,
+                assignDisabled: isFull,
                 assignedIds: assignedIds,
+                transferMap: transferMap,
+                transferDisabled: controller.state.actionLoading,
+                onTransferEmployee: (employee) async {
+                  final empId = _employeeIdFromMap(employee);
+                  if (empId == null) return;
+                  final transfer = transferMap[empId];
+                  if (transfer == null) return;
+                  final targetOpeningDailyId = opening["opening_daily_id"]?.toString() ??
+                      opening["daily_opening_id"]?.toString() ??
+                      opening["opening_daily"]?.toString() ??
+                      opening["id"]?.toString() ??
+                      _openingId(opening);
+                  final targetLayerId = opening["opening_layer_daily_id"]?.toString() ??
+                      opening["daily_opening_layer_id"]?.toString() ??
+                      opening["opening_layer_id"]?.toString() ??
+                      selectedLayerId;
+                  debugPrint(
+                    "Transfer: empId=$empId applicantId=${transfer["applicantId"]} targetOpeningDailyId=$targetOpeningDailyId targetLayerId=$targetLayerId fromOpeningId=${transfer["openingId"]}",
+                  );
+                    final priorOpeningDailyId =
+                        transfer["openingDailyId"] ?? transfer["openingId"] ?? "";
+                    if (priorOpeningDailyId.isNotEmpty) {
+                      await controller.unassignApplicant(
+                        openingDailyId: priorOpeningDailyId,
+                        applicantId: transfer["applicantId"] ?? "",
+                      );
+                    }
+                  final ok = await controller.updateApplicantStatusV2(
+                    openingDailyId: targetOpeningDailyId,
+                    applicantId: transfer["applicantId"] ?? "",
+                    status: "ACCEPTED",
+                  );
+                  controller.applyLocalTransfer(
+                    fromOpeningId: transfer["openingId"] ?? "",
+                    toOpeningId: currentOpeningId,
+                    employee: employee,
+                  );
+                  if (context.mounted) {
+                    _showSnack(context, "Transferred");
+                  }
+                  if (ok) {
+                    await controller.fetchOpenings();
+                    await controller.fetchApplicants();
+                    await controller.fetchEmployees();
+                  }
+                },
               ),
             ),
 
@@ -2843,6 +2962,9 @@ class _EmployeesAssignList extends StatelessWidget {
     required this.onAssignEmployee,
     required this.assignDisabled,
     required this.assignedIds,
+    required this.transferMap,
+    required this.onTransferEmployee,
+    required this.transferDisabled,
 
   });
 
@@ -2859,6 +2981,9 @@ class _EmployeesAssignList extends StatelessWidget {
   final ValueChanged<Map<String, dynamic>> onAssignEmployee;
   final bool assignDisabled;
   final Set<String> assignedIds;
+  final Map<String, Map<String, String>> transferMap;
+  final ValueChanged<Map<String, dynamic>> onTransferEmployee;
+  final bool transferDisabled;
 
 
 
@@ -2929,6 +3054,8 @@ class _EmployeesAssignList extends StatelessWidget {
                         final employeeId = _employeeIdFromMap(employee);
                         final isAssigned =
                             employeeId != null && assignedIds.contains(employeeId);
+                        final hasTransfer = employeeId != null &&
+                            transferMap.containsKey(employeeId);
                         final name =
                             "${employee["first_name"] ?? ""} ${employee["last_name"] ?? ""}"
                                 .trim();
@@ -2977,6 +3104,26 @@ class _EmployeesAssignList extends StatelessWidget {
                                 ),
                               ),
                               const SizedBox(width: 8),
+                              if (hasTransfer && !isAssigned)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: SizedBox(
+                                    height: 32,
+                                    child: ElevatedButton(
+                                      onPressed: transferDisabled
+                                          ? null
+                                          : () => onTransferEmployee(employee),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: AppColors.primary,
+                                        foregroundColor: Colors.white,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                        ),
+                                      ),
+                                      child: const Text("Transfer"),
+                                    ),
+                                  ),
+                                ),
                               SizedBox(
                                 height: 32,
                                 child: OutlinedButton(
@@ -3139,8 +3286,11 @@ Future<void> _handleAssign(
 
   }
 
-  final maxSelectable =
+  var maxSelectable =
       _maxSelectableForOpening(opening, controller.state.selectedScheduleShiftId);
+  if (maxSelectable <= 0 && selectedEmployees.isNotEmpty) {
+    maxSelectable = 1;
+  }
   if (selectedEmployees.length > maxSelectable) {
     _showSnack(
       context,
@@ -3180,7 +3330,9 @@ Future<void> _handleAssign(
 
 
 
-  if (empJobTitle.isNotEmpty && !openingJobTitles.contains(empJobTitle)) {
+  final needsJobTitleChoice =
+      empJobTitle.isEmpty || openingJobTitles.isEmpty || !openingJobTitles.contains(empJobTitle);
+  if (needsJobTitleChoice) {
 
     final options = (allJobTitles.isNotEmpty
             ? allJobTitles
@@ -5252,6 +5404,7 @@ String _formatDate(DateTime date) {
 String _openingId(Map<String, dynamic> opening) {
 
   return opening["opening_daily_id"]?.toString() ??
+      opening["effective_parent_id"]?.toString() ??
       opening["daily_opening_id"]?.toString() ??
       opening["daily_opening"]?.toString() ??
       opening["opening_daily"]?.toString() ??
@@ -5536,13 +5689,49 @@ class _PositionCounts {
   final int total;
 }
 
+_PositionCounts _shiftCountsForOpening(Map<String, dynamic> opening) {
+  final mobileTotal = _asInt(opening["mobile_total_count"]);
+  final mobileFilled = _asInt(opening["mobile_filled_count"]);
+  if (mobileTotal != null) {
+    final total = mobileTotal;
+    final filled = (mobileFilled ?? 0).clamp(0, total);
+    return _PositionCounts(filled: filled, total: total);
+  }
+  final details = opening["shift_details"];
+  if (details is! List || details.isEmpty) {
+    debugPrint(
+      "SHIFT_COUNTS fallback: shift_details missing for ${opening["name"]} id=${_openingId(opening)} keys=${opening.keys.toList()}",
+    );
+    final total = _asInt(opening["child_count"]) ?? 0;
+    final filled = _asInt(opening["applicant_count"]) ?? 0;
+    return _PositionCounts(
+      filled: filled.clamp(0, total),
+      total: total,
+    );
+  }
+  int total = 0;
+  int filled = 0;
+  for (final item in details) {
+    if (item is! Map) continue;
+    total += 1;
+    final applicants = (item["applicants"] as List?) ?? [];
+    final hasAssigned = applicants.any((a) {
+      if (a is! Map) return false;
+      final status = a["status"]?.toString().toUpperCase();
+      final assigned = a["is_assigned"] == true;
+      return status == "ACCEPTED" || assigned;
+    });
+    if (hasAssigned) filled += 1;
+  }
+  if (filled > total) filled = total;
+  return _PositionCounts(filled: filled, total: total);
+}
+
 int _openingOpenCount(Map<String, dynamic> opening) {
   final rawShiftCount = opening["shift_count"];
   if (rawShiftCount != null) {
     debugPrint("shift_count raw: $rawShiftCount (${rawShiftCount.runtimeType})");
   }
-  final shiftCount = _asInt(rawShiftCount);
-  if (shiftCount != null) return shiftCount;
   final rootChild = _asInt(opening["child_count"]);
   final rootApplicants = _asInt(opening["applicant_count"]);
   if (rootChild != null) {
@@ -5555,25 +5744,7 @@ int _openingOpenCount(Map<String, dynamic> opening) {
     return 1;
   }
   if (shiftDetails is List && shiftDetails.isNotEmpty) {
-    int sum = 0;
-    for (final detail in shiftDetails) {
-      if (detail is! Map) continue;
-      final child = _asInt(detail["child_count"]);
-      final applicants = _asInt(detail["applicant_count"]);
-      final openPositions = _asInt(detail["open_positions"]);
-      final totalOpenings = _asInt(detail["total_openings"]);
-      if (openPositions != null) {
-        sum += openPositions;
-      } else if (child != null) {
-        final open = child - (applicants ?? 0);
-        sum += open < 0 ? 0 : open;
-      } else if (totalOpenings != null) {
-        sum += totalOpenings;
-      } else {
-        sum += 1;
-      }
-    }
-    return sum;
+    return shiftDetails.length;
   }
 
   final nested = opening["opening"];
@@ -5591,6 +5762,9 @@ int _openingOpenCount(Map<String, dynamic> opening) {
       _asInt(opening["open_positions"]);
   if (totalOpenings != null) return totalOpenings;
 
+  final shiftCount = _asInt(rawShiftCount);
+  if (shiftCount != null) return shiftCount;
+
   final shiftPositions = opening["shift_positions"];
   if (shiftPositions is List) {
     return shiftPositions.isNotEmpty ? 1 : 0;
@@ -5605,12 +5779,16 @@ _PositionCounts _positionCountsForOpening(
   int assignedCount,
 ) {
   final detail = _detailForShift(opening, shiftId);
+  if (detail != null && identical(detail, opening)) {
+    return _positionCountsForDetail(detail, useJobTitleFallback: false);
+  }
   int? total;
   int? open;
   if (detail != null) {
     total = _asInt(detail["child_count"]) ??
         _asInt(detail["total_openings"]) ??
-        _asInt(detail["no_of_child_openings"]);
+        _asInt(detail["no_of_child_openings"]) ??
+        _asInt(detail["required_positions"]);
     open = _asInt(detail["open_positions"]);
   }
   total ??= _asInt(opening["child_count"]) ??
@@ -5619,27 +5797,77 @@ _PositionCounts _positionCountsForOpening(
       _asInt(opening["open_positions"]);
   open ??= _openingOpenCount(opening);
 
-  if (total == null) {
-    total = open > assignedCount ? open : assignedCount;
+  if (total == null && detail != null) {
+    final applicantList = (detail["applicants"] as List?) ?? [];
+    if (applicantList.isNotEmpty) {
+      total = _asInt(detail["total_openings"]) ??
+          _asInt(detail["child_count"]) ??
+          _asInt(detail["no_of_child_openings"]) ??
+          1;
+    }
+  }
+  total ??= open > assignedCount ? open : assignedCount;
+  if (total == 0) {
+    if (detail != null) {
+      final jobTitles = (detail["job_titles"] as List?) ?? [];
+      final shiftPositions = (detail["shift_positions"] as List?) ?? [];
+      total = jobTitles.isNotEmpty
+          ? jobTitles.length
+          : shiftPositions.isNotEmpty
+              ? shiftPositions.length
+              : 1;
+    } else if (opening["shift_details"] is List &&
+        (opening["shift_details"] as List).isNotEmpty) {
+      total = (opening["shift_details"] as List).length;
+    }
   }
 
   int filled = assignedCount;
+  if (detail != null) {
+    final applicantList = (detail["applicants"] as List?) ?? [];
+    if (applicantList.isNotEmpty) {
+      final accepted = applicantList.where((a) {
+        if (a is! Map) return false;
+        final status = a["status"]?.toString().toUpperCase();
+        final assigned = a["is_assigned"] == true;
+        return status == "ACCEPTED" || assigned;
+      }).length;
+      if (accepted > filled) filled = accepted;
+    }
+    final detailAssigned = _assignedEmployeesForDetail(detail).length;
+    if (detailAssigned > filled) filled = detailAssigned;
+  }
   if (filled > total) filled = total;
   if (filled < 0) filled = 0;
   return _PositionCounts(filled: filled, total: total);
 }
 
-_PositionCounts _positionCountsForDetail(Map<String, dynamic> detail) {
-  final total = _asInt(detail["child_count"]) ??
+_PositionCounts _positionCountsForDetail(
+  Map<String, dynamic> detail, {
+  bool useJobTitleFallback = true,
+  bool forceSingle = false,
+}) {
+  int total = _asInt(detail["child_count"]) ??
       _asInt(detail["total_openings"]) ??
       _asInt(detail["no_of_child_openings"]) ??
       _asInt(detail["open_positions"]) ??
+      _asInt(detail["required_positions"]) ??
       0;
+  if (forceSingle) {
+    total = 1;
+  }
+  if (total == 0 && useJobTitleFallback) {
+    final jobTitles = (detail["job_titles"] as List?) ?? [];
+    final shiftPositions = (detail["shift_positions"] as List?) ?? [];
+    if (jobTitles.isNotEmpty) total = jobTitles.length;
+    if (total == 0 && shiftPositions.isNotEmpty) total = shiftPositions.length;
+  }
   final assignedCount = _assignedEmployeesForDetail(detail).length;
   final open = _asInt(detail["open_positions"]);
   final applicants = _asInt(detail["applicant_count"]);
   int filled;
-  if (applicants != null && total > 0) {
+  final useApplicants = applicants != null && applicants > 0;
+  if (useApplicants && total > 0) {
     filled = applicants;
   } else if (open != null && total > 0) {
     filled = total - open;
@@ -5648,8 +5876,21 @@ _PositionCounts _positionCountsForDetail(Map<String, dynamic> detail) {
   } else {
     filled = 0;
   }
+  final applicantList = (detail["applicants"] as List?) ?? [];
+  if (applicantList.isNotEmpty) {
+    final accepted = applicantList.where((a) {
+      if (a is! Map) return false;
+      final status = a["status"]?.toString().toUpperCase();
+      final assigned = a["is_assigned"] == true;
+      return status == "ACCEPTED" || assigned;
+    }).length;
+    if (accepted > filled) filled = accepted;
+  }
+  if (assignedCount > filled) filled = assignedCount;
   if (filled < 0) filled = 0;
   if (filled > total) filled = total;
+  if (total == 0 && assignedCount > 0) total = assignedCount;
+  if (total == 0) total = 1;
   int safeTotal = total == 0 && (open ?? 0) > 0 ? (open ?? 0) : total;
   if (safeTotal == 0 && assignedCount > 0) {
     safeTotal = assignedCount;
@@ -5703,6 +5944,20 @@ List<Map<String, dynamic>> _assignedEmployeesForOpening(
   addEmployee(opening["assigned_employee"]);
   addEmployee(opening["assigned_employees"]);
   addEmployee(opening["filled_employees"]);
+  final applicants = (opening["applicants"] as List?) ?? [];
+  for (final item in applicants) {
+    if (item is! Map) continue;
+    final status = item["status"]?.toString().toUpperCase();
+    final assigned = item["is_assigned"] == true;
+    if (status == "ACCEPTED" || assigned) {
+      final nurse = item["nurse"];
+      if (nurse is Map) {
+        addEmployee(nurse);
+      } else {
+        addEmployee(item);
+      }
+    }
+  }
 
   return results;
 }
@@ -5742,6 +5997,20 @@ List<Map<String, dynamic>> _assignedEmployeesForDetail(
   addEmployee(detail["assigned_employee"]);
   addEmployee(detail["assigned_employees"]);
   addEmployee(detail["filled_employees"]);
+  final applicants = (detail["applicants"] as List?) ?? [];
+  for (final item in applicants) {
+    if (item is! Map) continue;
+    final status = item["status"]?.toString().toUpperCase();
+    final assigned = item["is_assigned"] == true;
+    if (status == "ACCEPTED" || assigned) {
+      final nurse = item["nurse"];
+      if (nurse is Map) {
+        addEmployee(nurse);
+      } else {
+        addEmployee(item);
+      }
+    }
+  }
 
   return results;
 }
@@ -5751,6 +6020,15 @@ Map<String, dynamic>? _detailForShift(
   String? shiftId,
 ) {
   final details = opening["shift_details"];
+  if (details == null) {
+    // If opening already looks like a detail row, return it directly.
+    final hasTiming = opening["start_time"] != null || opening["end_time"] != null;
+    final hasPositions =
+        opening["job_titles"] != null || opening["shift_positions"] != null;
+    if (hasTiming || hasPositions) {
+      return Map<String, dynamic>.from(opening);
+    }
+  }
   if (details is Map) return Map<String, dynamic>.from(details);
   if (details is List && details.isNotEmpty) {
     if (shiftId != null && shiftId.isNotEmpty) {
@@ -5758,7 +6036,8 @@ Map<String, dynamic>? _detailForShift(
         if (item is! Map) continue;
         final id = item["shift_id"]?.toString() ??
             item["id"]?.toString() ??
-            item["schedule_id"]?.toString();
+            item["schedule_id"]?.toString() ??
+            item["schedule_shift_id"]?.toString();
         if (id == shiftId) return Map<String, dynamic>.from(item);
       }
     }
@@ -5829,9 +6108,34 @@ int _maxSelectableForOpening(Map<String, dynamic> opening, String? shiftId) {
     }
     final totalOpenings = _asInt(detail["total_openings"]);
     if (totalOpenings != null) return totalOpenings;
+    final positions = _asInt(detail["no_of_child_openings"]) ??
+        _asInt(detail["required_positions"]);
+    if (positions != null) return positions;
+    final jobTitles = (detail["job_titles"] as List?) ?? [];
+    if (jobTitles.isNotEmpty) return jobTitles.length;
+    final shiftPositions = (detail["shift_positions"] as List?) ?? [];
+    if (shiftPositions.isNotEmpty) return shiftPositions.length;
+    final applicantList = (detail["applicants"] as List?) ?? [];
+    if (applicantList.isNotEmpty) {
+      final accepted = applicantList.where((a) {
+        if (a is! Map) return false;
+        final status = a["status"]?.toString().toUpperCase();
+        final assigned = a["is_assigned"] == true;
+        return status == "ACCEPTED" || assigned;
+      }).length;
+      final total = _asInt(detail["total_openings"]) ??
+          _asInt(detail["child_count"]) ??
+          _asInt(detail["no_of_child_openings"]) ??
+          1;
+      final open = total - accepted;
+      return open < 0 ? 0 : open;
+    }
   }
 
-  return _openingOpenCount(opening);
+  final fallback = _openingOpenCount(opening);
+  if (fallback == 0 && detail != null) return 1;
+  if (fallback == 0 && details is List && details.isNotEmpty) return 1;
+  return fallback;
 }
 
 int? _asInt(dynamic value) {
@@ -6232,11 +6536,7 @@ class _ShiftListScreenState extends ConsumerState<ShiftListScreen> {
           opening,
           state.selectedScheduleShiftId,
         );
-        final counts = _positionCountsForOpening(
-          opening,
-          state.selectedScheduleShiftId,
-          assigned.length,
-        );
+        final counts = _shiftCountsForOpening(opening);
         final isFilled = counts.total > 0 && counts.filled >= counts.total;
         return filterMode == "filled" ? isFilled : !isFilled;
       }).toList();
@@ -6298,15 +6598,7 @@ class _ShiftListScreenState extends ConsumerState<ShiftListScreen> {
               final time = _openingTime(opening);
               final unit = _unitLabel(opening);
               final openCount = _openingOpenCount(opening);
-              final assigned = _assignedEmployeesForOpening(
-                opening,
-                state.selectedScheduleShiftId,
-              );
-              final counts = _positionCountsForOpening(
-                opening,
-                state.selectedScheduleShiftId,
-                assigned.length,
-              );
+              final counts = _shiftCountsForOpening(opening);
               final filledText = "${counts.filled}/${counts.total} filled";
               final percent = counts.total > 0
                   ? (counts.filled / counts.total).clamp(0.0, 1.0).toDouble()
@@ -6458,60 +6750,67 @@ class OpeningDetailScreen extends ConsumerWidget {
     final controller = ref.read(dailyScheduleControllerProvider.notifier);
     final opening = state.selectedOpening;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("Openings"),
-      ),
-      body: opening == null
-          ? const Center(child: Text("Select a shift"))
-          : Column(
-              children: [
-                Expanded(
-                  child: _OpeningsList(
-                    opening: opening,
-                    openingId: openingId,
-                    onEdit: () => _openOpeningEditor(
-                      context,
-                      controller: controller,
-                      state: state,
-                      initial: opening,
-                    ),
-                    onDelete: () async {
-                      final ok =
-                          await _confirm(context, "Delete this opening?");
-                      if (!ok) return;
-                      final success = await controller.deleteOpening(openingId);
-                      if (context.mounted) {
-                        _showSnack(
-                          context,
-                          success ? "Opening deleted" : "Delete failed",
-                        );
-                        if (success) Navigator.pop(context);
-                      }
-                    },
-                    onOpen: () {
-                      Navigator.push(
+    return WillPopScope(
+      onWillPop: () async {
+        await controller.fetchOpenings();
+        return true;
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text("Openings"),
+        ),
+        body: opening == null
+            ? const Center(child: Text("Select a shift"))
+            : Column(
+                children: [
+                  Expanded(
+                    child: _OpeningsList(
+                      opening: opening,
+                      openingId: openingId,
+                      onEdit: () => _openOpeningEditor(
                         context,
-                        _slideRoute(
-                          PositionDetailScreen(openingId: openingId),
-                        ),
-                      );
-                    },
+                        controller: controller,
+                        state: state,
+                        initial: opening,
+                      ),
+                      onDelete: () async {
+                        final ok =
+                            await _confirm(context, "Delete this opening?");
+                        if (!ok) return;
+                        final success = await controller.deleteOpening(openingId);
+                        if (context.mounted) {
+                          _showSnack(
+                            context,
+                            success ? "Opening deleted" : "Delete failed",
+                          );
+                          if (success) Navigator.pop(context);
+                        }
+                      },
+                      onOpen: (detail) {
+                        controller.selectOpeningDetail(detail);
+                        Navigator.push(
+                          context,
+                          _slideRoute(
+                            PositionDetailScreen(openingId: openingId),
+                          ),
+                        );
+                      },
+                    ),
                   ),
-                ),
-              ],
-            ),
-      floatingActionButton: opening == null
-          ? null
-          : FloatingActionButton(
-              onPressed: () => _openOpeningEditor(
-                context,
-                controller: controller,
-                state: state,
-                initial: null,
+                ],
               ),
-              child: const Icon(Icons.add),
-            ),
+        floatingActionButton: opening == null
+            ? null
+            : FloatingActionButton(
+                onPressed: () => _openOpeningEditor(
+                  context,
+                  controller: controller,
+                  state: state,
+                  initial: null,
+                ),
+                child: const Icon(Icons.add),
+              ),
+      ),
     );
   }
 }
@@ -6529,7 +6828,7 @@ class _OpeningsList extends StatelessWidget {
   final String openingId;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
-  final VoidCallback onOpen;
+  final void Function(Map<String, dynamic> detail) onOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -6559,7 +6858,11 @@ class _OpeningsList extends StatelessWidget {
               detail["end_time"]?.toString(),
             );
             final unit = _unitLabel(opening);
-            final counts = _positionCountsForDetail(detail);
+            final counts = _positionCountsForDetail(
+              detail,
+              useJobTitleFallback: false,
+              forceSingle: true,
+            );
             final filledText = "${counts.filled}/${counts.total} filled";
             final percent = counts.total > 0
                 ? (counts.filled / counts.total).clamp(0.0, 1.0).toDouble()
@@ -6585,7 +6888,7 @@ class _OpeningsList extends StatelessWidget {
                 child: const Icon(Icons.delete, color: AppColors.red),
               ),
               child: InkWell(
-                onTap: onOpen,
+                onTap: () => onOpen(detail),
                 onLongPress: onEdit,
                 borderRadius: BorderRadius.circular(10),
                 child: Container(
@@ -6632,11 +6935,6 @@ class _OpeningsList extends StatelessWidget {
                                 color: Colors.white,
                                 size: 16,
                               ),
-                            )
-                          else
-                            _Pill(
-                              text: "${(counts.total - counts.filled).clamp(0, 999)} open",
-                              filled: true,
                             ),
                         ],
                       ),
@@ -6781,43 +7079,51 @@ class PositionDetailScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(dailyScheduleControllerProvider);
     final controller = ref.read(dailyScheduleControllerProvider.notifier);
-    final opening = state.selectedOpening;
+    final opening = state.selectedOpeningDetail ?? state.selectedOpening;
+    final countsSource = state.selectedOpening ?? opening;
 
-    return Scaffold(
-      appBar: AppBar(title: const Text("Fill Position")),
-      body: opening == null
-          ? const Center(child: Text("Select a shift"))
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _PositionDetail(
-                  opening: opening,
-                  controller: controller,
-                  selectedLayerId: state.selectedLayerId,
-                  selectedShiftId: state.selectedScheduleShiftId,
-                  applicants: state.applicants,
-                  employees: state.employees,
-                  applicantsLoading: state.applicantsLoading,
-                  employeesLoading: state.employeesLoading,
-                  selectedEmployees: state.selectedEmployees,
-                  employeeSearch: state.employeeSearch,
-                  applicantSearch: state.applicantSearch,
-                  employeeSelection: state.employeeSelection,
-                  onSelectLayer: controller.selectLayer,
-                  onSelectShift: controller.selectScheduleShift,
-                  onApplicantSearch: controller.setApplicantSearch,
-                  onEmployeeSearch: controller.setEmployeeSearch,
-                  onSelectionFilter: controller.setEmployeeSelection,
-                  onClearSelected: controller.clearSelectedEmployees,
-                  onAssign: (context) => _handleAssign(
-                    context,
-                    controller: controller,
+    return WillPopScope(
+      onWillPop: () async {
+        await controller.fetchOpenings();
+        return true;
+      },
+      child: Scaffold(
+        appBar: AppBar(title: const Text("Fill Position")),
+        body: opening == null
+            ? const Center(child: Text("Select a shift"))
+            : ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  _PositionDetail(
                     opening: opening,
+                    countsSource: countsSource,
+                    controller: controller,
+                    selectedLayerId: state.selectedLayerId,
+                    selectedShiftId: state.selectedScheduleShiftId,
+                    applicants: state.applicants,
+                    employees: state.employees,
+                    applicantsLoading: state.applicantsLoading,
+                    employeesLoading: state.employeesLoading,
                     selectedEmployees: state.selectedEmployees,
+                    employeeSearch: state.employeeSearch,
+                    applicantSearch: state.applicantSearch,
+                    employeeSelection: state.employeeSelection,
+                    onSelectLayer: controller.selectLayer,
+                    onSelectShift: controller.selectScheduleShift,
+                    onApplicantSearch: controller.setApplicantSearch,
+                    onEmployeeSearch: controller.setEmployeeSearch,
+                    onSelectionFilter: controller.setEmployeeSelection,
+                    onClearSelected: controller.clearSelectedEmployees,
+                    onAssign: (context) => _handleAssign(
+                      context,
+                      controller: controller,
+                      opening: opening,
+                      selectedEmployees: state.selectedEmployees,
+                    ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
+      ),
     );
   }
 }
